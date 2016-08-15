@@ -35,25 +35,36 @@ function handleMessage(message) {
 
     try {
         let realm = new Realm(message[0]);
-        realm.write(() => {
-            if (message[1] == 'create') {
-                result = message[3].map((value) => realm.create(message[2], value));
+        let run = (m) => {
+            if (m[0] == 'create') {
+                result = m[2].map((value) => realm.create(m[1], value));
             }
-            else if (message[1] == 'delete') {
-                let objects = realm.objects(message[2]);
-                objects = message[3].map((index) => objects[index]);
+            else if (m[0] == 'delete') {
+                let objects = realm.objects(m[1]);
+                objects = m[2].map((index) => objects[index]);
                 realm.delete(objects);
             }
-            else if (message[1] == 'update') {
-                result = message[3].map((value) => realm.create(message[2], value, true));
+            else if (m[0] == 'update') {
+                result = m[2].map((value) => realm.create(m[1], value, true));
             }
-            else if (message[1] == 'list_method') {
-                var listObject = realm.objects(message[2])[0];
-                var list = listObject[message[3]];
-                result = list[message[4]].apply(list, message.slice(5));
+            else if (m[0] == 'list_method') {
+                var listObject = realm.objects(m[1])[0];
+                var list = listObject[m[2]];
+                result = list[m[3]].apply(list, m.slice(4));
             }
             else {
-                throw new Error('Unknown realm method: ' + message[1]);
+                throw new Error('Unknown realm method: ' + m[0]);
+            }
+        };
+
+        realm.write(() => {
+            if (message[1] instanceof Array) {
+                for (let i = 1; i < message.length; ++i) {
+                    run(message[i]);
+                }
+            }
+            else {
+                run(message.slice(1));
             }
         });
     } catch (e) {

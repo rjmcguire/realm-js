@@ -31,25 +31,7 @@ namespace realm {
 namespace js {
 
 template<typename T>
-class Results : public realm::Results {
-  public:
-    Results(Results const& r) : realm::Results(r) {};
-    Results(realm::Results const& r) : realm::Results(r) {};
-    Results(Results&&) = default;
-    Results& operator=(Results&&) = default;
-    Results& operator=(Results const&) = default;
-    
-    Results() = default;
-    Results(SharedRealm r, Table& table) : realm::Results(r, table) {}
-    Results(SharedRealm r, Query q, SortOrder s = {}) : realm::Results(r, q, s) {}
-    Results(SharedRealm r, TableView tv, SortOrder s) : realm::Results(r, tv, s) {}
-    Results(SharedRealm r, LinkViewRef lv, util::Optional<Query> q = {}, SortOrder s = {}) : realm::Results(r, lv, q, s) {}
-    
-    std::vector<std::pair<Protected<typename T::Function>, NotificationToken>> m_notification_tokens;
-};
-
-template<typename T>
-struct ResultsClass : ClassDefinition<T, realm::js::Results<T>, CollectionClass<T>> {
+struct ResultsClass : ClassDefinition<T, ObservableCollection<T, Results>, CollectionClass<T>> {
     using ContextType = typename T::Context;
     using ObjectType = typename T::Object;
     using ValueType = typename T::Value;
@@ -57,6 +39,7 @@ struct ResultsClass : ClassDefinition<T, realm::js::Results<T>, CollectionClass<
     using Object = js::Object<T>;
     using Value = js::Value<T>;
     using ReturnValue = js::ReturnValue<T>;
+    using Collection = ObservableCollection<T, Results>;
 
     static ObjectType create_instance(ContextType, realm::Results);
     static ObjectType create_instance(ContextType, SharedRealm, const ObjectSchema &);
@@ -79,7 +62,7 @@ struct ResultsClass : ClassDefinition<T, realm::js::Results<T>, CollectionClass<
     static void add_listener(ContextType, ObjectType, size_t, const ValueType[], ReturnValue &);
     static void remove_listener(ContextType, ObjectType, size_t, const ValueType[], ReturnValue &);
     static void remove_all_listeners(ContextType, ObjectType, size_t, const ValueType[], ReturnValue &);
-    
+
     std::string const name = "Results";
 
     MethodMap<T> const methods = {
@@ -91,23 +74,23 @@ struct ResultsClass : ClassDefinition<T, realm::js::Results<T>, CollectionClass<
         {"removeListener", wrap<remove_listener>},
         {"removeAllListeners", wrap<remove_all_listeners>},
     };
-    
+
     PropertyMap<T> const properties = {
         {"length", {wrap<get_length>, nullptr}},
     };
-    
+
     IndexPropertyType<T> const index_accessor = {wrap<get_index>, nullptr};
 };
 
 template<typename T>
 typename T::Object ResultsClass<T>::create_instance(ContextType ctx, realm::Results results) {
-    return create_object<T, ResultsClass<T>>(ctx, new realm::js::Results<T>(std::move(results)));
+    return create_object<T, ResultsClass<T>>(ctx, new Collection(std::move(results)));
 }
 
 template<typename T>
 typename T::Object ResultsClass<T>::create_instance(ContextType ctx, SharedRealm realm, const ObjectSchema &object_schema) {
     auto table = ObjectStore::table_for_object_type(realm->read_group(), object_schema.name);
-    return create_object<T, ResultsClass<T>>(ctx, new realm::js::Results<T>(realm, *table));
+    return create_object<T, ResultsClass<T>>(ctx, new Collection(realm, *table));
 }
 
 template<typename T>
@@ -132,20 +115,28 @@ template<typename U>
 typename T::Object ResultsClass<T>::create_sorted(ContextType ctx, const U &collection, size_t argc, const ValueType arguments[]) {
     auto const &realm = collection.get_realm();
     auto const &object_schema = collection.get_object_schema();
-    std::vector<std::string> prop_names;
+    auto const &table = *ObjectStore::table_for_object_type(realm->read_group(), object_schema.name);
+    std::vector<std::vector<size_t>> columns;
     std::vector<bool> ascending;
-    size_t prop_count;
+
+    auto get_column = [&](std::string prop_name) {
+        const Property *prop = object_schema.property_for_name(prop_name);
+        if (!prop) {
+            throw std::runtime_error(util::format("Property '%1' does not exist on object type '%2'", prop_name, object_schema.name));
+        }
+        return prop->table_column;
+    };
 
     if (Value::is_array(ctx, arguments[0])) {
         validate_argument_count(argc, 1, "Second argument is not allowed if passed an array of sort descriptors");
 
         ObjectType js_prop_names = Value::validated_to_object(ctx, arguments[0]);
-        prop_count = Object::validated_get_length(ctx, js_prop_names);
+        size_t prop_count = Object::validated_get_length(ctx, js_prop_names);
         if (!prop_count) {
             throw std::invalid_argument("Sort descriptor array must not be empty");
         }
 
-        prop_names.resize(prop_count);
+        columns.resize(prop_count);
         ascending.resize(prop_count);
 
         for (unsigned int i = 0; i < prop_count; i++) {
@@ -153,11 +144,11 @@ typename T::Object ResultsClass<T>::create_sorted(ContextType ctx, const U &coll
 
             if (Value::is_array(ctx, value)) {
                 ObjectType array = Value::to_array(ctx, value);
-                prop_names[i] = Object::validated_get_string(ctx, array, 0);
+                columns[i] = {get_column(Object::validated_get_string(ctx, array, 0))};
                 ascending[i] = !Object::validated_get_boolean(ctx, array, 1);
             }
             else {
-                prop_names[i] = Value::validated_to_string(ctx, value);
+                columns[i] = {get_column(Value::validated_to_string(ctx, value))};
                 ascending[i] = true;
             }
         }
@@ -165,25 +156,12 @@ typename T::Object ResultsClass<T>::create_sorted(ContextType ctx, const U &coll
     else {
         validate_argument_count(argc, 1, 2);
 
-        prop_count = 1;
-        prop_names.push_back(Value::validated_to_string(ctx, arguments[0]));
-        ascending.push_back(argc == 1 ? true : !Value::to_boolean(ctx, arguments[1]));
+        columns.push_back({get_column(Value::validated_to_string(ctx, arguments[0]))});
+        ascending.push_back(argc == 1 || !Value::to_boolean(ctx, arguments[1]));
     }
 
-    std::vector<std::vector<size_t>> columns;
-    columns.reserve(prop_count);
-
-    for (std::string &prop_name : prop_names) {
-        const Property *prop = object_schema.property_for_name(prop_name);
-        if (!prop) {
-            throw std::runtime_error("Property '" + prop_name + "' does not exist on object type '" + object_schema.name + "'");
-        }
-        columns.push_back({prop->table_column});
-    }
-
-    auto table = realm::ObjectStore::table_for_object_type(realm->read_group(), object_schema.name);
-    auto results = new realm::js::Results<T>(realm, collection.get_query(),
-                                             {*table, std::move(columns), std::move(ascending)});
+    auto results = new Collection(realm, collection.get_query(),
+                                  SortDescriptor{table, std::move(columns), std::move(ascending)});
     return create_object<T, ResultsClass<T>>(ctx, results);
 }
 
@@ -236,49 +214,28 @@ template<typename T>
 void ResultsClass<T>::is_valid(ContextType ctx, ObjectType this_object, size_t argc, const ValueType arguments[], ReturnValue &return_value) {
     return_value.set(get_internal<T, ResultsClass<T>>(this_object)->is_valid());
 }
-    
+
 template<typename T>
 void ResultsClass<T>::add_listener(ContextType ctx, ObjectType this_object, size_t argc, const ValueType arguments[], ReturnValue &return_value) {
     validate_argument_count(argc, 1);
-    
+
     auto results = get_internal<T, ResultsClass<T>>(this_object);
-    auto callback = Value::validated_to_function(ctx, arguments[0]);
-    Protected<FunctionType> protected_callback(ctx, callback);
-    Protected<ObjectType> protected_this(ctx, this_object);
-    Protected<typename T::GlobalContext> protected_ctx(Context<T>::get_global_context(ctx));
-    
-    auto token = results->add_notification_callback([=](CollectionChangeSet change_set, std::exception_ptr exception) {
-        ValueType arguments[2];
-        arguments[0] = static_cast<ObjectType>(protected_this);
-        arguments[1] = CollectionClass<T>::create_collection_change_set(protected_ctx, change_set);
-        Function<T>::call(protected_ctx, protected_callback, protected_this, 2, arguments);
-    });
-    results->m_notification_tokens.emplace_back(protected_callback, std::move(token));
+    results->add_listener(ctx, this_object, arguments[0]);
 }
 
 template<typename T>
 void ResultsClass<T>::remove_listener(ContextType ctx, ObjectType this_object, size_t argc, const ValueType arguments[], ReturnValue &return_value) {
     validate_argument_count(argc, 1);
-    
+
     auto results = get_internal<T, ResultsClass<T>>(this_object);
-    auto callback = Value::validated_to_function(ctx, arguments[0]);
-    auto protected_function = Protected<FunctionType>(ctx, callback);
-    
-    typename Protected<FunctionType>::Comparator compare;
-    results->m_notification_tokens.erase(
-        std::remove_if(results->m_notification_tokens.begin(),
-                       results->m_notification_tokens.end(),
-                       [&](const auto & o) { return compare(o.first, protected_function); }),
-        results->m_notification_tokens.end());
+    results->remove_listener(Protected<ObjectType>(ctx, Value::validated_to_function(ctx, arguments[0])));
 }
 
 template<typename T>
 void ResultsClass<T>::remove_all_listeners(ContextType ctx, ObjectType this_object, size_t argc, const ValueType arguments[], ReturnValue &return_value) {
     validate_argument_count(argc, 0);
-    
-    auto results = get_internal<T, ResultsClass<T>>(this_object);
-    results->m_notification_tokens.clear();
+    get_internal<T, ResultsClass<T>>(this_object)->remove_all_listeners();
 }
-    
+
 } // js
 } // realm

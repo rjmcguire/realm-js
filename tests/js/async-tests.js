@@ -226,6 +226,47 @@ module.exports = {
         );
     },
 
+    testResultsBeforeAfter() {
+        var config = { schema: [schemas.IntPrimary] };
+        var expected = [
+            [[], []], // initial
+            [[], []], // before create
+            [[0, 1, 2], []], // after create
+            [[0], [2]], // before delete
+            [[], [1]], // after delete
+        ];
+        var messages = [
+            [config, 'create', 'IntPrimaryObject', [[0, '0'], [1, '1'], [2, '2']]],
+            [config, ['update', 'IntPrimaryObject', [[2, 'a']]],
+                     ['delete', 'IntPrimaryObject', [0]]],
+        ];
+
+        return createNotificationTest(
+            config,
+            (realm) => realm.objects('IntPrimaryObject').sorted('primaryCol'),
+            (collection, increment, resolve, reject, cleanup) => {
+                var listener = {
+                    'error': (object, error) => {},
+                    'before': (object, deletions, modifications) => {
+                        var notificationCount = increment();
+                        TestCase.assertArraysEqual(deletions, expected[notificationCount][0]);
+                        TestCase.assertArraysEqual(modifications, expected[notificationCount][1]);
+                    },
+                    'after': (object, insertions, modifications) => {
+                        var notificationCount = increment();
+                        TestCase.assertArraysEqual(insertions, expected[notificationCount][0]);
+                        TestCase.assertArraysEqual(modifications, expected[notificationCount][1]);
+                    }
+                };
+                collection.addListener(listener);
+                return listener;
+            },
+            (observable) => observable.removeAllListeners(),
+            messages,
+            expected.length
+        );
+    },
+
     testListAddNotifications() {
         var config = { schema: [schemas.TestObject, ListObject] };
         return createCollectionChangeTest(
@@ -354,6 +395,50 @@ module.exports = {
                 [[], [], []],
                 [[], [], [1]]
             ]
+        );
+    },
+
+    testListBeforeAfter() {
+        var config = { schema: [schemas.IntPrimary, PrimaryListObject] };
+        var expected = [
+            [[], []], // initial
+            [[], [1]], // before
+            [[0], [2]], // after
+        ];
+        var messages = [
+            [config, ['list_method', 'PrimaryListObject', 'list', 'unshift', [2, '2']],
+                     ['update', 'IntPrimaryObject', [[1, '11']]]],
+        ];
+
+        return createNotificationTest(
+            config,
+            (realm) => {
+                let listObject;
+                realm.write(() => {
+                    listObject = realm.create('PrimaryListObject', {list: [[0, '0'], [1, '1']]})
+                });
+                return listObject.list;
+            },
+            (collection, increment, resolve, reject, cleanup) => {
+                var listener = {
+                    'error': (object, error) => {},
+                    'before': (object, deletions, modifications) => {
+                        var notificationCount = increment();
+                        TestCase.assertArraysEqual(deletions, expected[notificationCount][0]);
+                        TestCase.assertArraysEqual(modifications, expected[notificationCount][1]);
+                    },
+                    'after': (object, insertions, modifications) => {
+                        var notificationCount = increment();
+                        TestCase.assertArraysEqual(insertions, expected[notificationCount][0]);
+                        TestCase.assertArraysEqual(modifications, expected[notificationCount][1]);
+                    }
+                };
+                collection.addListener(listener);
+                return listener;
+            },
+            (observable) => observable.removeAllListeners(),
+            messages,
+            expected.length
         );
     },
 };
